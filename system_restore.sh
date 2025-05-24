@@ -1,5 +1,8 @@
 #!/bin/bash
 
+cat > /root/system_restore.sh << 'EOL'
+#!/bin/bash
+
 # 颜色设置
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -12,100 +15,29 @@ NC='\033[0m'
 detect_os() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         OS_TYPE="macos"
-        DATE_CMD="gdate"
-        STAT_CMD="gstat"
-        # 检查是否安装了GNU工具
-        if ! command -v gdate &> /dev/null; then
-            echo -e "${YELLOW}检测到macOS系统，正在检查GNU工具...${NC}"
-            if ! command -v brew &> /dev/null; then
-                echo -e "${RED}错误: 请先安装Homebrew，然后运行: brew install coreutils${NC}"
+        # macOS需要GNU版本的工具
+        if ! command -v gstat &> /dev/null; then
+            echo -e "${YELLOW}检测到macOS，需要安装GNU工具...${NC}"
+            if command -v brew &> /dev/null; then
+                brew install coreutils
+            else
+                echo -e "${RED}请先安装Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${NC}"
                 exit 1
             fi
-            echo -e "${YELLOW}正在安装GNU工具...${NC}"
-            brew install coreutils
         fi
-    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    else
         OS_TYPE="linux"
-        DATE_CMD="date"
-        STAT_CMD="stat"
-    else
-        echo -e "${RED}错误: 不支持的操作系统类型${NC}"
-        exit 1
-    fi
-}
-
-# 格式化文件大小（跨平台兼容）
-format_size() {
-    local bytes=$1
-    if [ "$OS_TYPE" = "macos" ]; then
-        # macOS使用不同的参数
-        if command -v gnumfmt &> /dev/null; then
-            gnumfmt --to=iec-i --suffix=B $bytes 2>/dev/null || echo "${bytes}B"
-        else
-            # 简单的大小格式化
-            if [ $bytes -gt 1073741824 ]; then
-                echo "$(( bytes / 1073741824 ))GB"
-            elif [ $bytes -gt 1048576 ]; then
-                echo "$(( bytes / 1048576 ))MB"
-            elif [ $bytes -gt 1024 ]; then
-                echo "$(( bytes / 1024 ))KB"
-            else
-                echo "${bytes}B"
-            fi
-        fi
-    else
-        numfmt --to=iec-i --suffix=B $bytes 2>/dev/null || echo "${bytes}B"
-    fi
-}
-
-# 获取文件修改时间（跨平台兼容）
-get_file_date() {
-    local file_path="$1"
-    if [ "$OS_TYPE" = "macos" ]; then
-        $STAT_CMD -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$file_path" 2>/dev/null || echo "未知日期"
-    else
-        $STAT_CMD -c "%y" "$file_path" 2>/dev/null | cut -d'.' -f1 || echo "未知日期"
-    fi
-}
-
-# 获取文件大小（跨平台兼容）
-get_file_size() {
-    local file_path="$1"
-    if [ "$OS_TYPE" = "macos" ]; then
-        $STAT_CMD -f "%z" "$file_path" 2>/dev/null || echo "0"
-    else
-        $STAT_CMD -c "%s" "$file_path" 2>/dev/null || echo "0"
-    fi
-}
-
-# 远程获取文件信息（跨平台兼容）
-get_remote_file_info() {
-    local ssh_cmd="$1"
-    local file_path="$2"
-    
-    # 先检查远程系统类型
-    local remote_os=$(eval "$ssh_cmd 'uname -s'" 2>/dev/null)
-    
-    if [[ "$remote_os" == "Darwin" ]]; then
-        # 远程是macOS
-        eval "$ssh_cmd 'stat -f \"%z %m\" \"$file_path\"'" 2>/dev/null
-    else
-        # 远程是Linux
-        eval "$ssh_cmd 'stat -c \"%s %Y\" \"$file_path\"'" 2>/dev/null
     fi
 }
 
 clear
 echo -e "${BLUE}=================================================${NC}"
-echo -e "${BLUE}           系统快照恢复工具 v2.1                 ${NC}"
-echo -e "${BLUE}           (支持 Linux & macOS)                 ${NC}"
+echo -e "${BLUE}           系统快照恢复工具 v2.0                 ${NC}"
 echo -e "${BLUE}=================================================${NC}"
 echo ""
 
 # 检测操作系统
 detect_os
-echo -e "${CYAN}检测到操作系统: ${GREEN}$OS_TYPE${NC}"
-echo ""
 
 # 选择恢复模式
 echo -e "${CYAN}请选择恢复方式:${NC}"
@@ -132,13 +64,7 @@ local_restore() {
 
     # 查找本地快照文件
     echo -e "${BLUE}正在查找本地系统快照...${NC}"
-    
-    # 跨平台兼容的find命令
-    if [ "$OS_TYPE" = "macos" ]; then
-        SNAPSHOT_FILES=($(find $BACKUP_DIR -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r))
-    else
-        SNAPSHOT_FILES=($(find $BACKUP_DIR -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r))
-    fi
+    SNAPSHOT_FILES=($(find $BACKUP_DIR -maxdepth 1 -type f -name "system_snapshot_*.tar.gz" | sort -r))
 
     if [ ${#SNAPSHOT_FILES[@]} -eq 0 ]; then
         echo -e "${RED}错误: 未找到系统快照文件!${NC}"
@@ -151,10 +77,14 @@ local_restore() {
         SNAPSHOT_PATH="${SNAPSHOT_FILES[$i]}"
         SNAPSHOT_NAME=$(basename "$SNAPSHOT_PATH")
         
-        # 获取文件大小和日期
-        SNAPSHOT_SIZE_BYTES=$(get_file_size "$SNAPSHOT_PATH")
-        SNAPSHOT_SIZE=$(format_size "$SNAPSHOT_SIZE_BYTES")
-        SNAPSHOT_DATE=$(get_file_date "$SNAPSHOT_PATH")
+        # Mac兼容的文件信息获取
+        if [ "$OS_TYPE" = "macos" ]; then
+            SNAPSHOT_SIZE=$(gstat -c%s "$SNAPSHOT_PATH" | numfmt --to=iec-i --suffix=B 2>/dev/null || du -h "$SNAPSHOT_PATH" | cut -f1)
+            SNAPSHOT_DATE=$(gstat -c "%y" "$SNAPSHOT_PATH" | cut -d'.' -f1)
+        else
+            SNAPSHOT_SIZE=$(du -h "$SNAPSHOT_PATH" | cut -f1)
+            SNAPSHOT_DATE=$(date -r "$SNAPSHOT_PATH" "+%Y-%m-%d %H:%M:%S")
+        fi
         
         echo -e "$((i+1))) ${GREEN}$SNAPSHOT_NAME${NC} (${SNAPSHOT_SIZE}, ${SNAPSHOT_DATE})"
     done
@@ -184,9 +114,9 @@ remote_restore() {
     if ! command -v scp &> /dev/null; then
         echo -e "${RED}错误: 未找到 scp 命令${NC}"
         if [ "$OS_TYPE" = "macos" ]; then
-            echo -e "${YELLOW}macOS用户请运行: xcode-select --install${NC}"
+            echo -e "${YELLOW}请运行: xcode-select --install${NC}"
         else
-            echo -e "${YELLOW}Linux用户请安装: apt-get install openssh-client${NC}"
+            echo -e "${YELLOW}请先安装 openssh-client${NC}"
         fi
         exit 1
     fi
@@ -194,9 +124,9 @@ remote_restore() {
     if ! command -v ssh &> /dev/null; then
         echo -e "${RED}错误: 未找到 ssh 命令${NC}"
         if [ "$OS_TYPE" = "macos" ]; then
-            echo -e "${YELLOW}macOS用户请运行: xcode-select --install${NC}"
+            echo -e "${YELLOW}请运行: xcode-select --install${NC}"
         else
-            echo -e "${YELLOW}Linux用户请安装: apt-get install openssh-client${NC}"
+            echo -e "${YELLOW}请先安装 openssh-client${NC}"
         fi
         exit 1
     fi
@@ -240,7 +170,7 @@ remote_restore() {
                 if command -v brew &> /dev/null; then
                     brew install hudochenkov/sshpass/sshpass
                 else
-                    echo -e "${RED}错误: 请先安装Homebrew，然后运行: brew install hudochenkov/sshpass/sshpass${NC}"
+                    echo -e "${RED}错误: 请先安装Homebrew${NC}"
                     exit 1
                 fi
             else
@@ -256,7 +186,7 @@ remote_restore() {
         read -p "SSH私钥文件路径 [默认: ~/.ssh/id_rsa]: " SSH_KEY
         SSH_KEY=${SSH_KEY:-~/.ssh/id_rsa}
         
-        # 展开波浪号
+        # Mac兼容的路径展开
         SSH_KEY="${SSH_KEY/#\~/$HOME}"
         
         if [ ! -f "$SSH_KEY" ]; then
@@ -293,8 +223,16 @@ remote_restore() {
         exit 1
     fi
 
-    # 将快照列表转换为数组
-    IFS=$'\n' read -rd '' -a SNAPSHOT_FILES <<< "$SNAPSHOT_LIST"
+    # 将快照列表转换为数组 - Mac兼容写法
+    if [ "$OS_TYPE" = "macos" ]; then
+        # macOS使用不同的数组读取方式
+        SNAPSHOT_FILES=()
+        while IFS= read -r line; do
+            SNAPSHOT_FILES+=("$line")
+        done <<< "$SNAPSHOT_LIST"
+    else
+        IFS=$'\n' read -rd '' -a SNAPSHOT_FILES <<< "$SNAPSHOT_LIST"
+    fi
 
     # 显示可用快照列表
     echo -e "${YELLOW}远程服务器上可用的快照:${NC}"
@@ -302,19 +240,41 @@ remote_restore() {
         SNAPSHOT_PATH="${SNAPSHOT_FILES[$i]}"
         SNAPSHOT_NAME=$(basename "$SNAPSHOT_PATH")
         
-        # 获取文件大小和日期（跨平台兼容）
-        SNAPSHOT_INFO=$(get_remote_file_info "$SSH_CMD" "$SNAPSHOT_PATH")
+        # 获取文件大小和日期 - Mac兼容
+        # 先检测远程系统类型
+        REMOTE_OS=$(eval "$SSH_CMD 'uname -s'" 2>/dev/null)
+        
+        if [[ "$REMOTE_OS" == "Darwin" ]]; then
+            # 远程是Mac
+            SNAPSHOT_INFO=$(eval "$SSH_CMD 'stat -f \"%z %m\" \"$SNAPSHOT_PATH\"'" 2>/dev/null)
+        else
+            # 远程是Linux
+            SNAPSHOT_INFO=$(eval "$SSH_CMD 'stat -c \"%s %Y\" \"$SNAPSHOT_PATH\"'" 2>/dev/null)
+        fi
+        
         if [ -n "$SNAPSHOT_INFO" ]; then
             SNAPSHOT_SIZE_BYTES=$(echo "$SNAPSHOT_INFO" | cut -d' ' -f1)
             SNAPSHOT_TIMESTAMP=$(echo "$SNAPSHOT_INFO" | cut -d' ' -f2)
             
-            # 格式化大小
-            SNAPSHOT_SIZE=$(format_size "$SNAPSHOT_SIZE_BYTES")
-            # 格式化日期
+            # 格式化大小 - Mac兼容
             if [ "$OS_TYPE" = "macos" ]; then
-                SNAPSHOT_DATE=$($DATE_CMD -r "$SNAPSHOT_TIMESTAMP" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知日期")
+                if command -v gnumfmt &> /dev/null; then
+                    SNAPSHOT_SIZE=$(gnumfmt --to=iec-i --suffix=B $SNAPSHOT_SIZE_BYTES 2>/dev/null || echo "${SNAPSHOT_SIZE_BYTES}B")
+                else
+                    # 简单的大小计算
+                    if [ $SNAPSHOT_SIZE_BYTES -gt 1073741824 ]; then
+                        SNAPSHOT_SIZE="$(( SNAPSHOT_SIZE_BYTES / 1073741824 ))GB"
+                    elif [ $SNAPSHOT_SIZE_BYTES -gt 1048576 ]; then
+                        SNAPSHOT_SIZE="$(( SNAPSHOT_SIZE_BYTES / 1048576 ))MB"
+                    else
+                        SNAPSHOT_SIZE="$(( SNAPSHOT_SIZE_BYTES / 1024 ))KB"
+                    fi
+                fi
+                # Mac日期格式化
+                SNAPSHOT_DATE=$(date -r "$SNAPSHOT_TIMESTAMP" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知日期")
             else
-                SNAPSHOT_DATE=$($DATE_CMD -d "@$SNAPSHOT_TIMESTAMP" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知日期")
+                SNAPSHOT_SIZE=$(numfmt --to=iec-i --suffix=B $SNAPSHOT_SIZE_BYTES 2>/dev/null || echo "${SNAPSHOT_SIZE_BYTES}B")
+                SNAPSHOT_DATE=$(date -d "@$SNAPSHOT_TIMESTAMP" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知日期")
             fi
         else
             SNAPSHOT_SIZE="未知大小"
@@ -380,15 +340,9 @@ perform_restore() {
 
     # 恢复模式选择
     echo -e "\n${YELLOW}请选择恢复模式:${NC}"
-    if [ "$OS_TYPE" = "linux" ]; then
-        echo -e "1) ${GREEN}标准恢复${NC} - 恢复所有系统文件，但保留当前网络配置"
-        echo -e "2) ${GREEN}完全恢复${NC} - 完全恢复所有文件，包括网络配置（可能导致网络中断）"
-        read -p "请选择恢复模式 [1-2]: " RESTORE_MODE
-    else
-        echo -e "1) ${GREEN}标准恢复${NC} - 恢复用户文件和应用程序配置"
-        echo -e "2) ${GREEN}完全恢复${NC} - 恢复所有文件（不包括系统核心文件）"
-        read -p "请选择恢复模式 [1-2]: " RESTORE_MODE
-    fi
+    echo -e "1) ${GREEN}标准恢复${NC} - 恢复所有系统文件，但保留当前网络配置"
+    echo -e "2) ${GREEN}完全恢复${NC} - 完全恢复所有文件，包括网络配置（可能导致网络中断）"
+    read -p "请选择恢复模式 [1-2]: " RESTORE_MODE
 
     if ! [[ "$RESTORE_MODE" =~ ^[1-2]$ ]]; then
         echo -e "${RED}错误: 无效的选择!${NC}"
@@ -401,92 +355,57 @@ perform_restore() {
 
     # 备份关键系统配置
     if [ "$RESTORE_MODE" -eq 1 ]; then
-        echo -e "\n${BLUE}备份当前系统配置...${NC}"
+        echo -e "\n${BLUE}备份当前网络和系统配置...${NC}"
         if [ "$RESTORE_TYPE" -eq 2 ]; then
             BACKUP_CONFIG_DIR="$LOCAL_TEMP_DIR/current_config"
         else
-            BACKUP_CONFIG_DIR="/tmp/system_backup_$$"
+            BACKUP_CONFIG_DIR="/root/system_backup"
         fi
         mkdir -p "$BACKUP_CONFIG_DIR"
-        
-        if [ "$OS_TYPE" = "linux" ]; then
-            cp /etc/fstab "$BACKUP_CONFIG_DIR/fstab.bak" 2>/dev/null
-            cp /etc/network/interfaces "$BACKUP_CONFIG_DIR/interfaces.bak" 2>/dev/null
-            cp -r /etc/netplan "$BACKUP_CONFIG_DIR/" 2>/dev/null
-            cp /etc/hostname "$BACKUP_CONFIG_DIR/hostname.bak" 2>/dev/null
-            cp /etc/hosts "$BACKUP_CONFIG_DIR/hosts.bak" 2>/dev/null
-            cp /etc/resolv.conf "$BACKUP_CONFIG_DIR/resolv.conf.bak" 2>/dev/null
-        else
-            # macOS系统配置备份
-            cp /etc/hosts "$BACKUP_CONFIG_DIR/hosts.bak" 2>/dev/null
-            cp /etc/resolv.conf "$BACKUP_CONFIG_DIR/resolv.conf.bak" 2>/dev/null
-        fi
+        cp /etc/fstab "$BACKUP_CONFIG_DIR/fstab.bak" 2>/dev/null
+        cp /etc/network/interfaces "$BACKUP_CONFIG_DIR/interfaces.bak" 2>/dev/null
+        cp -r /etc/netplan "$BACKUP_CONFIG_DIR/" 2>/dev/null
+        cp /etc/hostname "$BACKUP_CONFIG_DIR/hostname.bak" 2>/dev/null
+        cp /etc/hosts "$BACKUP_CONFIG_DIR/hosts.bak" 2>/dev/null
+        cp /etc/resolv.conf "$BACKUP_CONFIG_DIR/resolv.conf.bak" 2>/dev/null
     fi
 
-    # 停止关键服务（仅Linux）
-    if [ "$OS_TYPE" = "linux" ]; then
-        echo -e "${BLUE}停止关键服务...${NC}"
-        for service in nginx apache2 mysql docker; do
-            if command -v systemctl &> /dev/null && systemctl is-active --quiet $service 2>/dev/null; then
-                echo "停止 $service 服务..."
-                systemctl stop $service 2>/dev/null
-            fi
-        done
-    fi
+    # 停止关键服务
+    echo -e "${BLUE}停止关键服务...${NC}"
+    for service in nginx apache2 mysql docker; do
+        if command -v systemctl &> /dev/null && systemctl is-active --quiet $service 2>/dev/null; then
+            echo "停止 $service 服务..."
+            systemctl stop $service 2>/dev/null
+        fi
+    done
 
     # 执行恢复
     echo -e "${BLUE}正在恢复系统文件...${NC}"
 
-    if [ "$OS_TYPE" = "linux" ]; then
-        # Linux系统恢复
-        if [ "$RESTORE_MODE" -eq 1 ]; then
-            # 标准恢复 - 保留网络设置
-            tar -xzf "$LOCAL_SNAPSHOT" -C / \
-                --exclude="dev/*" \
-                --exclude="proc/*" \
-                --exclude="sys/*" \
-                --exclude="run/*" \
-                --exclude="tmp/*" \
-                --exclude="etc/fstab" \
-                --exclude="etc/hostname" \
-                --exclude="etc/hosts" \
-                --exclude="etc/network/*" \
-                --exclude="etc/netplan/*" \
-                --exclude="etc/resolv.conf" \
-                --exclude="backups/*"
-        else
-            # 完全恢复 - 包括网络设置
-            tar -xzf "$LOCAL_SNAPSHOT" -C / \
-                --exclude="dev/*" \
-                --exclude="proc/*" \
-                --exclude="sys/*" \
-                --exclude="run/*" \
-                --exclude="tmp/*" \
-                --exclude="backups/*"
-        fi
+    if [ "$RESTORE_MODE" -eq 1 ]; then
+        # 标准恢复 - 保留网络设置
+        tar -xzf "$LOCAL_SNAPSHOT" -C / \
+            --exclude="dev/*" \
+            --exclude="proc/*" \
+            --exclude="sys/*" \
+            --exclude="run/*" \
+            --exclude="tmp/*" \
+            --exclude="etc/fstab" \
+            --exclude="etc/hostname" \
+            --exclude="etc/hosts" \
+            --exclude="etc/network/*" \
+            --exclude="etc/netplan/*" \
+            --exclude="etc/resolv.conf" \
+            --exclude="backups/*"
     else
-        # macOS系统恢复（更加谨慎）
-        if [ "$RESTORE_MODE" -eq 1 ]; then
-            # 标准恢复 - 主要恢复用户文件
-            tar -xzf "$LOCAL_SNAPSHOT" -C / \
-                --exclude="System/*" \
-                --exclude="dev/*" \
-                --exclude="private/var/vm/*" \
-                --exclude="private/var/tmp/*" \
-                --exclude="tmp/*" \
-                --exclude="etc/hosts" \
-                --exclude="etc/resolv.conf" \
-                --exclude="backups/*"
-        else
-            # 完全恢复 - 包括更多系统文件，但排除核心系统
-            tar -xzf "$LOCAL_SNAPSHOT" -C / \
-                --exclude="System/*" \
-                --exclude="dev/*" \
-                --exclude="private/var/vm/*" \
-                --exclude="private/var/tmp/*" \
-                --exclude="tmp/*" \
-                --exclude="backups/*"
-        fi
+        # 完全恢复 - 包括网络设置
+        tar -xzf "$LOCAL_SNAPSHOT" -C / \
+            --exclude="dev/*" \
+            --exclude="proc/*" \
+            --exclude="sys/*" \
+            --exclude="run/*" \
+            --exclude="tmp/*" \
+            --exclude="backups/*"
     fi
 
     RESTORE_RESULT=$?
@@ -499,31 +418,21 @@ perform_restore() {
         exit 1
     fi
 
-    # 恢复系统配置(标准模式)
+    # 恢复网络配置(标准模式)
     if [ "$RESTORE_MODE" -eq 1 ]; then
-        echo -e "${BLUE}恢复当前系统配置...${NC}"
+        echo -e "${BLUE}恢复当前网络配置...${NC}"
         if [ "$RESTORE_TYPE" -eq 2 ]; then
             BACKUP_CONFIG_DIR="$LOCAL_TEMP_DIR/current_config"
         else
-            BACKUP_CONFIG_DIR="/tmp/system_backup_$$"
+            BACKUP_CONFIG_DIR="/root/system_backup"
         fi
         
-        if [ "$OS_TYPE" = "linux" ]; then
-            cp "$BACKUP_CONFIG_DIR/fstab.bak" /etc/fstab 2>/dev/null
-            cp "$BACKUP_CONFIG_DIR/interfaces.bak" /etc/network/interfaces 2>/dev/null
-            cp -r "$BACKUP_CONFIG_DIR/netplan"/* /etc/netplan/ 2>/dev/null
-            cp "$BACKUP_CONFIG_DIR/hostname.bak" /etc/hostname 2>/dev/null
-            cp "$BACKUP_CONFIG_DIR/hosts.bak" /etc/hosts 2>/dev/null
-            cp "$BACKUP_CONFIG_DIR/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
-        else
-            cp "$BACKUP_CONFIG_DIR/hosts.bak" /etc/hosts 2>/dev/null
-            cp "$BACKUP_CONFIG_DIR/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
-        fi
-        
-        # 清理临时配置备份
-        if [ "$RESTORE_TYPE" -ne 2 ]; then
-            rm -rf "$BACKUP_CONFIG_DIR"
-        fi
+        cp "$BACKUP_CONFIG_DIR/fstab.bak" /etc/fstab 2>/dev/null
+        cp "$BACKUP_CONFIG_DIR/interfaces.bak" /etc/network/interfaces 2>/dev/null
+        cp -r "$BACKUP_CONFIG_DIR/netplan"/* /etc/netplan/ 2>/dev/null
+        cp "$BACKUP_CONFIG_DIR/hostname.bak" /etc/hostname 2>/dev/null
+        cp "$BACKUP_CONFIG_DIR/hosts.bak" /etc/hosts 2>/dev/null
+        cp "$BACKUP_CONFIG_DIR/resolv.conf.bak" /etc/resolv.conf 2>/dev/null
     fi
 
     # 清理临时文件
@@ -541,26 +450,18 @@ perform_restore() {
     fi
     
     if [ "$RESTORE_MODE" -eq 1 ]; then
-        if [ "$OS_TYPE" = "linux" ]; then
-            echo -e "${BLUE}已保留当前网络配置.${NC}"
-        else
-            echo -e "${BLUE}已保留当前系统配置.${NC}"
-        fi
+        echo -e "${BLUE}已保留当前网络配置.${NC}"
     else
-        echo -e "${YELLOW}已恢复所有设置.${NC}"
+        echo -e "${YELLOW}已恢复所有设置，包括网络配置.${NC}"
     fi
 
     # 提示重启
-    echo -e "\n${YELLOW}建议重启系统以完成恢复.${NC}"
+    echo -e "\n${YELLOW}系统需要重启以完成恢复.${NC}"
     read -p "是否立即重启系统? [y/N]: " REBOOT
     if [[ "$REBOOT" =~ ^[Yy]$ ]]; then
         echo -e "${BLUE}系统将在5秒后重启...${NC}"
         sleep 5
-        if [ "$OS_TYPE" = "linux" ]; then
-            reboot
-        else
-            sudo reboot
-        fi
+        reboot
     else
         echo -e "${YELLOW}请手动重启系统以完成恢复.${NC}"
     fi
@@ -574,3 +475,26 @@ else
 fi
 
 perform_restore
+EOL
+
+chmod +x /root/system_restore.sh
+
+echo "[✓] 统一系统恢复脚本已创建完成!"
+echo "[i] 脚本位置: /root/system_restore.sh"
+echo ""
+echo "功能特性:"
+echo "  🔄 统一界面 - 运行时选择本地或远程恢复"
+echo "  🏠 本地恢复 - 从/backups目录恢复快照"
+echo "  🌐 远程恢复 - 从远程服务器下载并恢复快照 (已修复Mac兼容性)"
+echo "  🔐 隐私保护 - 所有敏感信息运行时输入"
+echo "  🔑 双重认证 - 支持密码和SSH密钥认证"
+echo "  ⚡ 智能恢复 - 标准模式保留网络配置"
+echo "  🧹 自动清理 - 临时文件自动删除"
+echo "  ❌ 错误处理 - 完善的错误检查机制"
+echo "  🖥️  Mac兼容 - 自动检测并适配macOS系统"
+echo ""
+echo "使用方法: 直接运行 /root/system_restore.sh"
+echo "  1. 选择本地或远程恢复方式"
+echo "  2. 根据提示输入相关信息"
+echo "  3. 选择要恢复的快照"
+echo "  4. 选择恢复模式并确认"
